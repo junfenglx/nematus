@@ -24,3 +24,13 @@ def norm_weight(nin, nout=None, scale=0.01, ortho=True):
         W = scale * numpy.random.randn(nin, nout)
     return W.astype(floatX)
 
+
+def glorot_normal(nin, nout=None, ksize=3, gain=1.0):
+    if gain == "relu":
+        gain = numpy.sqrt(2)
+    if nout is None:
+        nout = nin
+    std = gain * numpy.sqrt(2.0 / ((nin + nout) * ksize))
+    W = std * numpy.random.rand(nout, nin, ksize, 1)
+    return W.astype(floatX)
+

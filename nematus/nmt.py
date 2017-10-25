@@ -100,42 +100,67 @@ def init_params(options):
     if not options['tie_encoder_decoder_embeddings']:
         params = get_layer_param('embedding')(options, params, options['n_words'], options['dim_word'], suffix='_dec')
 
-    # encoder: bidirectional RNN
-    params = get_layer_param(options['encoder'])(options, params,
-                                              prefix='encoder',
-                                              nin=options['dim_word'],
-                                              dim=options['dim'],
-                                              recurrence_transition_depth=options['enc_recurrence_transition_depth'])
-    params = get_layer_param(options['encoder'])(options, params,
-                                              prefix='encoder_r',
-                                              nin=options['dim_word'],
-                                              dim=options['dim'],
-                                              recurrence_transition_depth=options['enc_recurrence_transition_depth'])
-    if options['enc_depth'] > 1:
-        for level in range(2, options['enc_depth'] + 1):
-            prefix_f = pp('encoder', level)
-            prefix_r = pp('encoder_r', level)
-
-            if level <= options['enc_depth_bidirectional']:
+    if options['encoder'] == 'conv1d':
+        # encoder Deep Conv1D
+        first_out = options['dim_word'] * 2
+        last_out = options['dim'] * 2
+        if first_out > last_out:
+            first_out = last_out
+        params = get_layer_param(options['encoder'])(options, params,
+                                                     prefix='encoder_conv1d_1',
+                                                     nin=options['dim_word'],
+                                                     nout=first_out, ksize=3,
+                                                     residual=False)
+        hidden_size = prev_out = first_out
+        if options['enc_depth'] > 1:
+            for level in range(2, options['enc_depth'] + 1):
+                if level % 2 == 1:
+                    hidden_size *= 2
+                if hidden_size > last_out:
+                    hidden_size = last_out
                 params = get_layer_param(options['encoder'])(options, params,
-                                                             prefix=prefix_f,
-                                                             nin=options['dim'],
-                                                             dim=options['dim'],
-                                                             recurrence_transition_depth=options['enc_recurrence_transition_depth'])
-                params = get_layer_param(options['encoder'])(options, params,
-                                                             prefix=prefix_r,
-                                                             nin=options['dim'],
-                                                             dim=options['dim'],
-                                                             recurrence_transition_depth=options['enc_recurrence_transition_depth'])
-            else:
-                params = get_layer_param(options['encoder'])(options, params,
-                                                             prefix=prefix_f,
-                                                             nin=options['dim'] * 2,
-                                                             dim=options['dim'] * 2,
-                                                             recurrence_transition_depth=options['enc_recurrence_transition_depth'])
+                                                             prefix=pp('encoder', 'conv1d_{}'.format(level)),
+                                                             nin=prev_out,
+                                                             nout=hidden_size, ksize=3,
+                                                             residual=True)
+                prev_out = hidden_size
+        ctxdim = hidden_size
+    else:
+        # encoder: bidirectional RNN
+        params = get_layer_param(options['encoder'])(options, params,
+                                                  prefix='encoder',
+                                                  nin=options['dim_word'],
+                                                  dim=options['dim'],
+                                                  recurrence_transition_depth=options['enc_recurrence_transition_depth'])
+        params = get_layer_param(options['encoder'])(options, params,
+                                                  prefix='encoder_r',
+                                                  nin=options['dim_word'],
+                                                  dim=options['dim'],
+                                                  recurrence_transition_depth=options['enc_recurrence_transition_depth'])
+        if options['enc_depth'] > 1:
+            for level in range(2, options['enc_depth'] + 1):
+                prefix_f = pp('encoder', level)
+                prefix_r = pp('encoder_r', level)
 
+                if level <= options['enc_depth_bidirectional']:
+                    params = get_layer_param(options['encoder'])(options, params,
+                                                                 prefix=prefix_f,
+                                                                 nin=options['dim'],
+                                                                 dim=options['dim'],
+                                                                 recurrence_transition_depth=options['enc_recurrence_transition_depth'])
+                    params = get_layer_param(options['encoder'])(options, params,
+                                                                 prefix=prefix_r,
+                                                                 nin=options['dim'],
+                                                                 dim=options['dim'],
+                                                                 recurrence_transition_depth=options['enc_recurrence_transition_depth'])
+                else:
+                    params = get_layer_param(options['encoder'])(options, params,
+                                                                 prefix=prefix_f,
+                                                                 nin=options['dim'] * 2,
+                                                                 dim=options['dim'] * 2,
+                                                                 recurrence_transition_depth=options['enc_recurrence_transition_depth'])
 
-    ctxdim = 2 * options['dim']
+        ctxdim = 2 * options['dim']
 
     dec_state = options['dim']
     if options['decoder'].startswith('lstm'):
@@ -222,6 +247,22 @@ def build_encoder(tparams, options, dropout, x_mask=None, sampling=False):
             # we drop out the same words in both directions
             embr *= source_dropout[::-1]
 
+    # conv1d encoder
+    if options['encoder'] == 'conv1d':
+        ctx = get_layer_constr(options['encoder'])(tparams, emb, options, dropout,
+                                                    prefix='encoder_conv1d_1',
+                                                    mask=x_mask,
+                                                    residual=False,
+                                                    dropout_probability=options['dropout_embedding'])
+
+        if options['enc_depth'] > 1:
+            for level in range(2, options['enc_depth'] + 1):
+                ctx = get_layer_constr(options['encoder'])(tparams, ctx, options, dropout,
+                                                            prefix=pp('encoder', 'conv1d_{}'.format(level)),
+                                                            mask=x_mask,
+                                                            residual=True,
+                                                            dropout_probability=options['dropout_hidden'])
+        return x, ctx
 
     ## level 1
     proj = get_layer_constr(options['encoder'])(tparams, emb, options, dropout,
@@ -962,7 +1003,7 @@ def augment_raml_data(x, y, tgt_worddict, options):
     aug_y = []
     sample_weights = numpy.empty((0), dtype=floatX)
     vocab = range(1, options['n_words']) # vocabulary for perturbation
-    vocab.remove(tgt_worddict['eos'])
+    vocab.remove(tgt_worddict['<eos>'])
     vocab.remove(tgt_worddict['UNK'])
     bleu_scorer = ScorerProvider().get("SENTENCEBLEU n=4")
     for x_s, y_s in zip(x, y):
@@ -992,7 +1033,7 @@ def augment_raml_data(x, y, tgt_worddict, options):
                     y_sample_weights.append(numpy.exp(y_bleu / options['raml_tau']) / numpy.exp(-edits / options['raml_tau']))
                 else:
                     y_sample_weights = [1.0] * options['raml_samples']
-                    
+
 
             elif options['raml_reward'] == "edit_distance":
                 q = edit_distance_distribution(sentence_length=len(y_c), vocab_size=options['n_words'], tau=options['raml_tau'])
@@ -1404,10 +1445,10 @@ def train(dim_word=512,  # word vector dimensionality
                 if model_options['objective'] == 'RAML':
                     x, y, sample_weights = augment_raml_data(x, y, options=model_options,
                                                              tgt_worddict=worddicts[-1])
-                                                            
+
                 else:
                     sample_weights = [1.0] * len(y)
-                
+
                 xlen = len(x)
                 n_samples += xlen
 
@@ -1421,7 +1462,7 @@ def train(dim_word=512,  # word vector dimensionality
                     logging.warning('Minibatch with zero sample under length %d' % maxlen)
                     training_progress.uidx -= 1
                     continue
-                
+
                 cost_batches += 1
                 last_disp_samples += xlen
                 last_words += (numpy.sum(x_mask) + numpy.sum(y_mask))/2.0
@@ -1800,7 +1841,7 @@ if __name__ == '__main__':
     network.add_argument('--tie_decoder_embeddings', action="store_true", dest="tie_decoder_embeddings",
                          help="tie the input embeddings of the decoder with the softmax output embeddings")
     network.add_argument('--encoder', type=str, default='gru',
-                         choices=['gru', 'lstm'],
+                         choices=['gru', 'lstm', 'conv1d'],
                          help='encoder recurrent layer (default: %(default)s)')
     network.add_argument('--decoder', type=str, default='gru_cond',
                          choices=['gru_cond', 'lstm_cond'],
